@@ -1,14 +1,50 @@
+import os
+
 import numpy as np
 import streamlit as st
 import pandas as pd
 import tempfile
 
-
-from utils.logger import create_csv_log
+from utils.text_utils import create_csv_log, translit_txt
 from utils.media_utils import VideoFrameGenerator, ImgProcess
 from plates_recognize.plates_recognize_yolo import model_cars, model_plates, model_symbols, PredictProcessBox, \
     PredictProcessObb
 from utils.time_utils import get_date, get_time
+
+
+# Функция для обработки введённых номеров
+def input_numbers(input_string):
+    if input_string:
+        result = []
+        errors = []
+        for num in input_string.split(','):
+            try:
+                result.append(translit_txt(num))
+            except ValueError as e:
+                print(f"Обработано в input_numbers: {e}")
+                errors.append(f'{e} в {num}')
+
+        return result, errors if len(errors) > 0 else None
+    return [], None
+
+
+# Функция для загрузки номеров из CSV
+def load_numbers_from_csv(file, header=None, sep=','):
+    if file is not None:
+        df = pd.read_csv(file, header=None, sep=sep)
+        # Нужные номера находятся в первом столбце
+        if not df.empty:
+            result = []
+            errors = []
+            for num in df.iloc[:, 0].astype(str):
+                try:
+                    result.append(translit_txt(num))
+                except ValueError as e:
+                    print(f"Обработано в load_numbers_from_csv: {e}")
+                    errors.append(f'{e} в {num}')
+
+            return result, errors if len(errors) > 0 else None
+    return [], None
 
 
 def main(frames_skip=5):
@@ -25,10 +61,13 @@ def main(frames_skip=5):
         if 'current_frame_index' not in st.session_state:
             st.session_state.current_frame_index = 0
 
-        # Создание генератора кадров видео
-        video_gen = VideoFrameGenerator(video_path)
+        # Инициализация сессионного состояния для переключения вкладок
+        if 'show_numbers' not in st.session_state:
+            st.session_state.show_numbers = False
 
-        fps = video_gen.fps
+        # Инициализация сессионного состояния для списка номеров
+        if 'number_set' not in st.session_state:
+            st.session_state.number_set = set()  # список уникальных значений
 
         # Ползунки для задания положения и размера прямоугольника
         st.sidebar.header("Координаты зоны детекции")
@@ -40,8 +79,51 @@ def main(frames_skip=5):
         show_timer = st.sidebar.checkbox("Показывать время детекции", value=True)
         show_boxes = st.sidebar.checkbox("Выделять обнаруженные объекты ", value=False)
 
-        # Ввод текста
-        user_text = st.sidebar.text_input("Введите искомый номер", "А111АА69")
+        # Функция для переключения между вкладками
+        def toggle_numbers():
+            st.session_state.show_numbers = not st.session_state.show_numbers
+
+        # Добавление кнопки для переключения
+        if st.sidebar.button("Список номеров"):
+            toggle_numbers()
+
+        # Создание генератора кадров видео
+        video_gen = VideoFrameGenerator(video_path)
+
+        fps = video_gen.fps
+
+        # Если нажата кнопка показа списка номеров
+        if st.session_state.show_numbers:
+            # Поле для ввода номеров
+            numbers_str = st.sidebar.text_input("Введите номера через запятую", "")
+            keyb_numbers, keyb_errors = input_numbers(numbers_str)
+            if keyb_errors is not None:
+                st.sidebar.write(*keyb_errors)
+
+            # Загрузка файла CSV
+            uploaded_csv_file = st.sidebar.file_uploader("Загрузите CSV файл", type=["csv"])
+            csv_numbers, csv_errors = load_numbers_from_csv(uploaded_csv_file)
+            if csv_errors is not None:
+                st.sidebar.write(*csv_errors)
+
+            # Обновление состояния сессии
+            print(f'{st.session_state.number_set=}')
+            add_numbers = keyb_numbers + csv_numbers
+            st.session_state.number_set.update(add_numbers)
+
+            # Вывод списка номеров
+            st.sidebar.write("Список номеров:", ", ".join(st.session_state.number_set))
+
+            # Кнопка для очистки списка
+            clear_set = st.sidebar.button("Очистить список")
+            if clear_set:
+                print('очистка списка')
+                st.session_state.number_set.clear()
+
+        # Запись номеров в cars_database
+        cars_database = st.session_state.get('number_set', [])
+        print(f'{cars_database=}')
+
         detect_text = ''
         access_text = ''
         access_allowed = False
@@ -61,8 +143,8 @@ def main(frames_skip=5):
             frame_text_placeholder = st.empty()  # Плейсхолдер для текста
         with col2:
             detected_frame_placeholder = st.empty()  # Плейсхолдер для детекции
-            detected_text_placeholder = st.empty()  # Плейсхолдер для текста
-        plate_placeholder = st.empty()
+            detected_text_placeholder = st.empty()
+        plate_placeholder = st.empty()  # Плейсхолдер для номера
         plate_text_placeholder = st.empty()
 
         # Перезапускаем видео только при нажатии на кнопку
@@ -123,7 +205,7 @@ def main(frames_skip=5):
                         recognition_text = f'Распознан номер {plate_text}'
                         recognize_time = sum(predict_plates.timer.values()) + sum(predict_symbols.timer.values())
                         # проверка номера
-                        access_allowed = True if plate_text == user_text else False
+                        access_allowed = True if plate_text in cars_database else False
                     else:
                         recognition_text = 'Не удалось распознать номер'
 
@@ -158,7 +240,7 @@ def main(frames_skip=5):
             # Очистка фреймов если нет авто в зоне
             else:
                 # Очистка строк
-                # frame_text_placeholder.text('')
+
                 access_allowed = False
                 detect_text = ''
                 detected_frame_placeholder.image(empty_image)
@@ -168,7 +250,6 @@ def main(frames_skip=5):
 
         # Освобождение ресурсов
         video_gen.release()
-
 
         # очистка
         frame_text_placeholder.text('')
@@ -186,6 +267,7 @@ def main(frames_skip=5):
             st.dataframe(df)  # Используйте st.table(df) для статической таблицы
 
         st.session_state.clear()
+
 
 if __name__ == "__main__":
     main()
